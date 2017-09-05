@@ -1,0 +1,135 @@
+#!/bin/bash
+#:  * `cleanup-bin` <regex> <package_name>:
+#:    Search the `$(brew --prefix)/bin` directory for unlinked
+#:    non-Homebrew binaries, then move those binaries into
+#:    its own keg and `brew link` them from there.
+#:
+#:    Example:
+#:
+#:    The command
+#:
+#:      brew cleanup-bin '/usr/local/bin/v(irtual)?box.*' virtualbox
+#:
+#:    will move all unlinked binaries belonging to VirtualBox
+#:    from /usr/local/bin into the following keg:
+#:
+#:      /usr/local/Cellar/virtualbox-executables/<VirtualBox version>
+#:
+#:    It will then `brew link` the binaries from that keg.
+#:
+#:    Arguments:
+#:
+#:    - <regex> an extended regular expression, compatible to
+#:      GNU find’s `-iregex` primary; this regular expression
+#:      will indicate to the command which binaries to look for.
+#:
+#:    - <package_name> the name of a non-Homebrew package.
+#:      The command currently supports the following packages:
+#:
+#:        meld
+#:        virtualbox
+#:    
+#:      The package name will be used to construct the keg name.
+#:      It also tells the command to query the version number
+#:      of the package, e. g. by passing the `--version` option
+#:      to one of the binaries that belong to this package.
+#:
+#:      The exact method to query the version number is unique
+#:      to each package; it is therefore hard-coded into this
+#:      command, and limits the number of supported packages
+#:      to the above table.
+#:
+#:      To request support for another package, submit a PR to:
+#:      https://github.com/claui/homebrew-cleanup-bin
+
+bin_cleanup () {
+  (
+    set -eu
+    binary_regex="${1?Usage: ${FUNCNAME} PKGNAME REGEX}"
+    upstream_name="${2?Usage: ${FUNCNAME} PKGNAME REGEX}"
+
+    bad_prefix="${HOMEBREW_PREFIX}/bin"
+    package_name="${upstream_name}-executables"
+
+    printf >&2 '%s: Searching %s for unlinked binaries ...' \
+      "${upstream_name}" "${bad_prefix}"
+
+    num_binaries="$(
+      find -E "${bad_prefix}" -mindepth 1 -type l -prune \
+        -or -iregex "${binary_regex}" -print \
+        | wc -l
+    )"
+    printf >&2 ' %d file(s)\n' "${num_binaries}"
+
+
+    if [[ "${num_binaries}" -gt 0 ]]; then
+      package_version="$(_${FUNCNAME}_getversion_${upstream_name})"
+      keg="${HOMEBREW_CELLAR}/${package_name}/${package_version}"
+      good_prefix="${keg}/bin"
+
+      printf >&2 '> %s: %s ...\n' "${upstream_name}" \
+        'Searching for existing links'
+
+      if brew linkage --test "${package_name}" >/dev/null 2>&1; then
+        printf >&2 '> %s: Calling `%s` on %s ...\n' \
+          "${upstream_name}" 'brew uninstall' "${package_name}"
+        printf >&2 '> %s: %s\n' "${upstream_name}" \
+          "$(brew uninstall -f "${package_name}")"
+      fi
+
+      printf >&2 '> %s: %s %s ...\n' "${upstream_name}" \
+        'Creating directory' "${good_prefix}"
+      mkdir -p "${good_prefix}"
+      printf >&2 '> %s: Moving %d files ...\n' "${upstream_name}" \
+        "${num_binaries}"
+
+      export good_prefix upstream_name
+      find -E "${bad_prefix}" -mindepth 1 -type l -prune \
+        -or -iregex "${binary_regex}" \
+        -exec bash -c "$(cat << 'EOF'
+          printf >&2 '> %s: Moving %s ...\n' "${upstream_name}" \
+            '{}'
+          mv -v '{}' "${good_prefix}/"
+EOF
+          )" ';'
+
+      printf >&2 '> %s: Calling `%s` on %s ...\n' \
+        "${upstream_name}" 'brew link' "${package_name}"
+      printf >&2 '> %s: %s\n' "${upstream_name}" \
+        "$(brew link "${package_name}")"
+
+      printf >&2 '> %s: %s\n\n' "${upstream_name}" \
+        'Cleanup completed'
+    fi
+  )
+}
+
+_bin_cleanup_getversion_meld () {
+  "${HOMEBREW_PREFIX}/bin/meld" --version 2>/dev/null \
+    | awk '/^meld [0-9\.]*$/ { print $2 }'
+}
+
+_bin_cleanup_getversion_virtualbox () {
+  "${HOMEBREW_PREFIX}/bin/VBoxManage" --version
+}
+
+_bin_cleanup_getversion_openzfs () {
+  xmllint -xpath \
+    "string(/plist/dict[1]/key[. = 'CFBundleVersion'
+      ]/following-sibling::*[1])" \
+    '/Library/Extensions/zfs.kext/Contents/Info.plist'
+}
+
+
+set -eu
+# bin_cleanup "$@"
+
+export HOMEBREW_PREFIX="$(/usr/bin/env brew --prefix)"
+export HOMEBREW_CELLAR="$(/usr/bin/env brew --cellar)"
+
+bin_cleanup "/usr/local/bin/meld" meld
+bin_cleanup "/usr/local/bin/v(irtual)?box.*" virtualbox
+bin_cleanup "/usr/local/bin/(`
+  `arcstat.pl|InvariantDisks|u?mount_zfs|zconfigd`
+  `|zdb|zed|zfs|zhack|zinject|zpios|zpool|zstreamdump`
+  `|zsysctl|ztest)" openzfs
